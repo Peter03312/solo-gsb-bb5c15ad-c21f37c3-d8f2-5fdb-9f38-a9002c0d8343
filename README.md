@@ -12,6 +12,8 @@ TypeScript / Node.js + PostgreSQL 实现的危险货箱三维舱位配载审定�
 
 航次修订号前进导致无法发布时，调度员可提交**方案 ID、所见方案修订号与所见航次修订号**把未发布方案**迁移（rebase）到当前航次**：以方案来源修订号的正式布局为**共同基线逐箱三方合并**——仅一方改动（含撤位）采用该方位置，双方改动到同一位置（含双方撤位）视为一致，目标不同则返回冲突箱号及双方位置、方案保持原状；撤位按空位置参与比较。合并后的完整布局用**当前航次约束**复验，违反返回现有规则明细且不迁移。成功后原子更新方案来源修订号与约束快照、保存合并布局、推进方案修订号，旧方案布局仍在方案历史中可追溯；**再次迁移以新的来源修订号为基线**。迁移不改变正式布局、清单与核对作业，迁移后发布仍遵守现有发布冲突与重复发布幂等规则。
 
+清单签发后，调度员还可对任一**已签发冻结清单**发起**港序卸货审查（discharge review）**：提交有序且不重复的卸港列表与清单内每个箱的卸港（箱号必须与清单完全一致、卸港必须出现在列表中），服务**按清单冻结箱位**逐港模拟不倒箱卸货——每港反复卸走列顶（上方已空）且属于本港的箱直到再无可卸箱，被后续港箱压住的本港箱留船，**后续港不回补此前漏卸箱**；返回各港实际卸箱、受阻箱及其同列上方仍在船的全部阻挡箱号与箱位（区分后续港 `later`／同港 `same`／此前漏港 `earlier`）、最终逾港未卸箱与 `feasibleWithoutRestow` 结论。审查结论随提交内容永久留档，**航次后续调整或签发新清单均不改变旧审查结果**；同一清单同一提交内容天然幂等，不同港序/卸港申报可各自独立审查。
+
 ---
 
 ## 1. 模型与规则
@@ -156,6 +158,7 @@ npm run build && node test/e2e-check.js       # 核对作业/上报/结案/并�
 npm run build && node test/e2e-constraints.js # 安全约束变更/历史留痕/冻结基准/并发
 npm run build && node test/e2e-plans.js       # 试排方案/发布冲突/只读幂等/并发
 npm run build && node test/e2e-migrate.js    # 方案迁移/三方合并/冲突/复验失败/过期/并发
+npm run build && node test/e2e-discharge.js  # 港序卸货审查/逐港模拟/阻挡链/逾港/冻结不变/拒绝/幂等
 ```
 
 ---
@@ -187,6 +190,9 @@ npm run build && node test/e2e-migrate.js    # 方案迁移/三方合并/冲突/
 | `POST` | `/api/plans/:planId/moves` | **方案内整批调整**（携带方案修订号） |
 | `POST` | `/api/plans/:planId/publish` | **发布方案**（原子写入航次新修订号；冲突 409 保留方案） |
 | `POST` | `/api/plans/:planId/migrate` | **方案迁移到当前航次**（三方合并；携带所见方案/航次修订号） |
+| `POST` | `/api/voyages/:id/manifests/:rev/discharge-reviews` | **港序卸货审查**（对已签发冻结清单提交港序与每箱卸港，逐港模拟） |
+| `GET` | `/api/voyages/:id/discharge-reviews` | 卸货审查列表（`?manifestRevision=N` 按清单过滤） |
+| `GET` | `/api/discharge-reviews/:reviewId` | 取某次卸货审查的冻结结果 |
 | `GET` | `/health` | 健康检查（含数据库连通性） |
 
 ### 4.1 登记航次
@@ -511,13 +517,115 @@ curl -sS -X POST http://localhost:3000/api/plans/<planId>/publish
 
 > 迁移只重定方案基线与方案快照，**不产生航次修订号、不改变正式布局/清单/核对作业**；迁移后方案的 `sourceRevision` 等于航次当前修订号，即可按 4.8 节正常发布，发布仍遵守 `publish_conflict` 与重复发布幂等规则。
 
+### 4.10 港序卸货审查（按冻结清单逐港模拟，不倒箱判定）
+
+调度员判断**已签发清单能否按港序卸货而不倒箱**。审查基准是某修订号的**已签发冻结清单**（`manifest_items` 独立副本）：按清单冻结箱位模拟，不读取当前布局，因此航次后续调整、约束变更、签发新清单都**不改变**任何既有审查结果。
+
+**提交**（路径 `:rev` 为清单修订号；请求体为有序卸港列表 + 清单内每箱卸港）：
+
+```bash
+curl -sS -X POST http://localhost:3000/api/voyages/<id>/manifests/1/discharge-reviews \
+  -H 'content-type: application/json' -d '{
+  "ports": ["SHA", "SIN", "HAM"],
+  "items": [
+    { "boxNo": "BOX-1", "dischargePort": "SIN" },
+    { "boxNo": "BOX-2", "dischargePort": "SIN" },
+    { "boxNo": "BOX-3", "dischargePort": "SHA" },
+    { "boxNo": "BOX-4", "dischargePort": "HAM" }
+  ]
+}'
+```
+
+请求要求（任一不满足即**明确拒绝**，见错误码表）：
+
+- 清单修订号必须已签发（未知清单 → 404 `manifest_not_found`，未知航次 → 404 `voyage_not_found`）；
+- `ports` 必须**有序、非空、不重复**（空列表 → 400 `invalid_request_body`；重复港 → 400 `invalid_discharge_request`，issue `duplicate_port_in_order`）；
+- `items` 箱号集合必须与清单**完全一致**：缺漏 → `manifest_box_missing`，多余/清单外箱 → `unknown_box_for_manifest`，同箱重复申报 → `duplicate_box_in_request`；
+- 每箱 `dischargePort` 必须出现在 `ports` 中，否则 `unknown_discharge_port`。业务问题一次性在 `details.issues[]` 全部返回。
+
+**模拟语义**（列＝同一 `(bay,row)` 垂直堆叠，只有列顶箱可直接卸）：
+
+1. 按 `ports` 顺序逐港作业；
+2. 每港对全船反复扫描，卸走所有“**列顶（同列上方已空）且卸港为本港**”的箱；只要本轮有箱卸下就继续扫描，直到再无可卸箱（同港箱叠放可连锁卸出）；
+3. 本港结束时仍在船的本港箱记入 `blocked`（受阻留船），其 `blockers[]` 列出**同列上方仍在船的全部阻挡箱**，自近而远（tier 由低到高）给出 `boxNo` 与冻结 `position`，并标注相对本港的关系：
+   - `later`：后续港箱（典型“被后续港箱压住”）；
+   - `same`：同为当前港箱（其本身这一港也受阻）；
+   - `earlier`：此前港次已漏卸的逾港箱（漏港箱在后续港反过来压住本港箱）；
+4. **后续港不回补此前漏卸箱**：箱在其卸港未卸即永久留船；全部港次走完后仍在船的箱进入 `overCarried[]`（含其应卸港序号 `dischargePortIndex` 与冻结箱位）；
+5. `feasibleWithoutRestow` 为 `true` 当且仅当最终无逾港未卸箱（全部箱都在其卸港当港卸空）。
+
+**响应**（201 首次创建；`simulation` 为完整模拟结果）：
+
+```json
+{
+  "reviewId": "…uuid…", "replay": false,
+  "voyageId": "…", "manifestRevision": 1,
+  "requestHash": "…sha256…", "createdAt": "…",
+  "ports": ["SHA", "SIN", "HAM"],
+  "items": [ …与提交一致… ],
+  "simulation": {
+    "ports": ["SHA", "SIN", "HAM"],
+    "portResults": [
+      {
+        "port": "SHA", "portIndex": 1,
+        "discharged": [ { "boxNo": "BOX-3", "position": { "bay": 1, "row": 1, "tier": 2 } } ],
+        "blocked": []
+      },
+      {
+        "port": "SIN", "portIndex": 2,
+        "discharged": [
+          { "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 0 } },
+          { "boxNo": "BOX-2", "position": { "bay": 1, "row": 1, "tier": 1 } }
+        ],
+        "blocked": []
+      },
+      {
+        "port": "HAM", "portIndex": 3,
+        "discharged": [ { "boxNo": "BOX-4", "position": { "bay": 2, "row": 1, "tier": 0 } } ],
+        "blocked": []
+      }
+    ],
+    "overCarried": [],
+    "feasibleWithoutRestow": true,
+    "counts": { "totalBoxes": 4, "discharged": 4, "blockedAtOwnPort": 0, "overCarried": 0 }
+  }
+}
+```
+
+不可行示例（BOX-1 为 SHA 箱被压在 SIN/HAM 箱下方）的受阻明细形如：
+
+```json
+{
+  "port": "SHA", "portIndex": 1,
+  "discharged": [ { "boxNo": "BOX-4", "position": { "bay": 2, "row": 1, "tier": 0 } } ],
+  "blocked": [
+    {
+      "boxNo": "BOX-1",
+      "position": { "bay": 1, "row": 1, "tier": 0 },
+      "dischargePort": "SHA",
+      "blockers": [
+        { "boxNo": "BOX-2", "position": { "bay": 1, "row": 1, "tier": 1 }, "dischargePort": "SIN", "relation": "later" },
+        { "boxNo": "BOX-3", "position": { "bay": 1, "row": 1, "tier": 2 }, "dischargePort": "HAM", "relation": "later" }
+      ]
+    }
+  ]
+}
+```
+
+**冻结、幂等与查询**：
+
+- 同一清单 + 同一提交内容（`ports` 与按箱号排序后的 `items` 的 sha256 指纹）重复提交 → **200 `replay:true`**，返回首次审查的同一 `reviewId` 与冻结结果，不重新模拟、不新建记录；
+- 同一清单允许按**不同港序/不同卸港申报**多次审查，各自独立留档；
+- `GET /api/voyages/:id/discharge-reviews`（可带 `?manifestRevision=N`）列出审查；`GET /api/discharge-reviews/:reviewId` 取单条冻结结果（未知审查 → 404 `discharge_review_not_found`）；
+- 审查结果在创建时即随提交内容落库（`discharge_reviews`），航次后续调整或签发新清单后，旧审查仍返回原冻结结论。
+
 ### 状态码约定
 
 | 状态 | 场景 |
 | --- | --- |
 | 200 / 201 | 查询成功 / 创建或首次签发、首次受理上报、首次结案成功、首次发布方案（幂等重试返回 200） |
-| 400 | 请求体非法、未知箱、坐标越界、同批重复箱号；约束变更的非正承重/越界列坐标/重复类别对或重复列覆盖；方案 ID 格式非法 |
-| 404 | 航次/修订号/清单/核对作业/试排方案不存在（含以未签发清单开工） |
+| 400 | 请求体非法、未知箱、坐标越界、同批重复箱号；约束变更的非正承重/越界列坐标/重复类别对或重复列覆盖；方案 ID 格式非法；**卸货审查的空/重复港序（`invalid_discharge_request`，issues：`empty_port_order`/`duplicate_port_in_order`/`duplicate_box_in_request`/`unknown_box_for_manifest`/`manifest_box_missing`/`unknown_discharge_port`）** |
+| 404 | 航次/修订号/清单/核对作业/试排方案/**卸货审查**不存在（含以未签发清单开工或审查） |
 | 409 | 修订号过期（整批调整、约束变更、签发、方案内调整、**方案迁移（分方案/航次两个 scope）**共用）；同清单重复开工、上报号内容冲突、结案后新上报、核对有差异不可结案；方案已发布（`plan_published`）、航次修订号偏离方案来源（`publish_conflict`）、**方案迁移双方改动目标不同（`migration_conflict`）或无需迁移（`migration_not_needed`）** |
 | 422 | 配载规则违反整批拒绝（整批调整、约束变更复验、方案内调整、**方案迁移按当前航次约束复验**）；或尚有箱未配位即签发 |
 | 503 | `/health` 数据库不可达 |
@@ -556,6 +664,12 @@ curl -sS -X POST http://localhost:3000/api/plans/<planId>/publish
   BASE=http://localhost:3000 bash examples/migrate-curl.sh
   ```
 
+- `examples/discharge-curl.sh` —— 港序卸货审查全流程 curl（自备已签发清单→可行审查连锁卸空→同内容重放→不可行审查的受阻箱/阻挡箱/逾港箱→空/重复港序与箱号缺漏/多余/未知港拒绝→列表与单条查询→签发新清单后旧审查结论不变）：
+
+  ```bash
+  BASE=http://localhost:3000 bash examples/discharge-curl.sh
+  ```
+
 - `examples/api.http` —— REST Client / JetBrains HTTP Client 文件（含核对段落）；
 - `examples/demo.ts` —— Node 示例（内置 fetch）：
 
@@ -571,22 +685,26 @@ curl -sS -X POST http://localhost:3000/api/plans/<planId>/publish
 src/
   domain.ts        领域模型 + 纯函数规则校验（最终布局五项规则、请求级检查、十进制重量、迁移三方合并）
   check.ts         装船核对纯函数（最后上报汇总、应装/已核对/缺失/错位/清单外、结案条件）
+  discharge.ts     港序卸货模拟纯函数（请求级校验、逐港列顶卸货迭代、阻挡链关系、逾港未卸、可行性）
   service.ts       事务编排：乐观修订号、整批调整、签发冻结、并发互斥
   check-service.ts 核对作业事务：开工/上报幂等与冲突/留痕/状态/结案冻结（行级互斥）
+  discharge-service.ts 卸货审查事务：清单冻结箱位读取、请求校验、模拟落档、同内容幂等（永久留档）
   plan-service.ts  试排方案事务：建立快照/方案内整批调整/查询/发布/迁移rebase（方案行 + 航次行互斥）
   db.ts            连接池、等待就绪、幂等建表
-  schema.sql       PostgreSQL 表结构（航次/列限/箱/不相容规则/修订布局/清单/核对作业与上报/试排方案）
+  schema.sql       PostgreSQL 表结构（航次/列限/箱/不相容规则/修订布局/清单/核对作业与上报/试排方案/卸货审查）
   http/            Express 路由与 zod 请求校验
   config.ts errors.ts app.ts start.ts
 test/
   validator.test.ts  配载规则单元测试（node --test）
   check.test.ts      核对纯函数单元测试
   merge.test.ts      方案迁移三方合并纯函数单元测试（一方改动/双方同位/撤位/冲突）
+  discharge.test.ts  港序卸货模拟纯函数单元测试（列顶迭代/连锁卸/阻挡 same/later/earlier/逾港/请求拒绝）
   e2e.js             对真实 PostgreSQL 的端到端/并发验证（开发辅助）
   e2e-check.js       核对作业端到端/并发验证（开发辅助）
   e2e-constraints.js 安全约束变更端到端/历史留痕/并发验证（开发辅助）
   e2e-plans.js       试排方案端到端/发布冲突/只读幂等/并发验证（开发辅助）
   e2e-migrate.js     方案迁移端到端/三方合并/冲突/复验失败/过期/连续迁移/并发（开发辅助）
+  e2e-discharge.js   港序卸货审查端到端/逐港模拟/阻挡链/逾港/冻结不变/拒绝/幂等（开发辅助）
 examples/          curl / .http / Node 调用示例
 Dockerfile  docker-compose.yml
 ```
@@ -603,5 +721,6 @@ Dockerfile  docker-compose.yml
 - `stowage_plans` 记录试排方案：来源修订号 `source_rev`、独立的方案修订号 `rev`、状态（`open`/`published`）与发布结果（`published_rev`/`published_at`，供重复发布幂等重放）；
 - `plan_placements` 按 `(plan_id, rev)` 全量保存方案每个方案修订号的试排布局（与 `placements` 同构留痕）；
 - `plan_constraint_defaults` / `plan_constraint_column_limits` / `plan_constraint_incompat_rules` 保存方案创建时固定的约束快照（每方案一份，不随方案修订号演进）；发布时把方案布局与这套约束原子复制为航次新修订号的 `placements` 与约束快照。
+- `discharge_reviews` 保存港序卸货审查：`(voyage_id, manifest_rev, request_hash)` 唯一使“同清单 + 同提交内容”天然幂等；`request_jsonb` 冻结有序港序与每箱卸港，`result_jsonb` 冻结逐港模拟结果（各港实卸/受阻/阻挡箱与箱位/逾港未卸/可行性）。审查只读取 `manifest_items` 冻结箱位，**航次后续调整或签发新清单不改变旧审查结论**；同一清单的不同港序/卸港申报各自独立留档。
 
 > 从早期“约束不随修订号留痕”的版本升级时，`src/schema.sql` 启动会幂等地把旧的 `column_weight_limits` / `incompat_rules`（当时全局且不可变）回填为每个历史修订号的快照，再删除旧表；新库不受影响。

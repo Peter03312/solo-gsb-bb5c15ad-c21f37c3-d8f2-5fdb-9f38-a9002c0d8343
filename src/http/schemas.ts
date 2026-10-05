@@ -138,3 +138,25 @@ export const checkReportSchema = z.object({
   boxNo: z.string().trim().min(1, '箱号不能为空').max(32),
   position: positionSchema.nullable(),
 });
+
+// ---- 港序卸货审查 ----
+
+/**
+ * 对已签发冻结清单提交卸货审查：
+ *  - ports：有序卸港列表（业务层再查空/重复；空数组直接非法）；
+ *  - items：清单内每个箱的卸港（箱号集合必须与清单完全一致，业务层校验）。
+ */
+export const createDischargeReviewSchema = z
+  .object({
+    ports: z
+      .array(z.string().trim().min(1, '卸港名不能为空').max(64))
+      .min(1, '卸港列表不能为空：必须提交至少一个有序且不重复的卸港'),
+    // items 允许空数组：空清单（0 箱）提交空申报时，与清单“完全一致”由业务层判定
+    items: z.array(
+      z.object({
+        boxNo: z.string().trim().min(1, '箱号不能为空').max(32),
+        dischargePort: z.string().trim().min(1, '卸港不能为空').max(64),
+      }),
+    ),
+  })
+  .transform((d) => ({ ports: d.ports, items: d.items }));

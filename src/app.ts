@@ -4,6 +4,7 @@ import { createApiRouter, errorHandler } from './http/routes';
 import { VoyageService } from './service';
 import { CheckService } from './check-service';
 import { PlanService } from './plan-service';
+import { DischargeService } from './discharge-service';
 import { ping } from './db';
 
 export function createApp(pool: Pool): express.Express {
@@ -21,7 +22,8 @@ export function createApp(pool: Pool): express.Express {
   const service = new VoyageService(pool);
   const checkService = new CheckService(pool);
   const planService = new PlanService(pool);
-  app.use('/api', createApiRouter(service, checkService, planService));
+  const dischargeService = new DischargeService(pool);
+  app.use('/api', createApiRouter(service, checkService, planService, dischargeService));
 
   app.use((_req, res) => {
     res.status(404).json({ error: { code: 'route_not_found', message: '接口不存在' } });

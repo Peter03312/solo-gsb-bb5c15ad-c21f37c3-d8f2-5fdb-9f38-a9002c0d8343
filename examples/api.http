@@ -197,3 +197,28 @@ Content-Type: application/json
   "planRevision": 1,
   "voyageRevision": 2
 }
+
+### ========== 港序卸货审查 ==========
+
+@manifestRev = 1
+
+### 对已签发冻结清单提交港序卸货审查（有序不重复卸港 + 每箱卸港；同内容重放 replay:true）
+POST {{host}}/api/voyages/{{id}}/manifests/{{manifestRev}}/discharge-reviews
+Content-Type: application/json
+
+{
+  "ports": ["SHA", "SIN", "HAM"],
+  "items": [
+    { "boxNo": "BOX-1", "dischargePort": "SIN" },
+    { "boxNo": "BOX-2", "dischargePort": "SIN" },
+    { "boxNo": "BOX-3", "dischargePort": "SHA" },
+    { "boxNo": "BOX-4", "dischargePort": "HAM" }
+  ]
+}
+
+### 航次下的卸货审查列表（?manifestRevision=N 可只看某清单）
+GET {{host}}/api/voyages/{{id}}/discharge-reviews
+
+### 取某次卸货审查的冻结结果
+@reviewId = 00000000-0000-0000-0000-000000000000
+GET {{host}}/api/discharge-reviews/{{reviewId}}

@@ -3,10 +3,12 @@ import { z } from 'zod';
 import { VoyageService } from '../service';
 import { CheckService } from '../check-service';
 import { PlanService } from '../plan-service';
+import { DischargeService } from '../discharge-service';
 import { HttpError } from '../errors';
 import {
   applyMovesSchema,
   checkReportSchema,
+  createDischargeReviewSchema,
   createPlanSchema,
   createVoyageSchema,
   issueManifestSchema,
@@ -21,6 +23,7 @@ export function createApiRouter(
   service: VoyageService,
   checkService: CheckService,
   planService: PlanService,
+  dischargeService: DischargeService,
 ): Router {
   const router = Router();
 
@@ -121,6 +124,42 @@ export function createApiRouter(
       throw HttpError.badRequest('invalid_revision', '修订号必须为非负整数');
     }
     service.getManifest(id, Number(raw)).then((v) => res.json(v)).catch(next);
+  });
+
+  // ---- 港序卸货审查（按冻结清单箱位逐港模拟，不倒箱判定）----
+
+  // 航次下的卸货审查列表（?manifestRevision=N 可只看某清单）
+  router.get('/voyages/:id/discharge-reviews', (req, res, next) => {
+    const id = parseVoyageId(req);
+    const revRaw = req.query.manifestRevision;
+    let rev: number | undefined;
+    if (revRaw !== undefined) {
+      if (typeof revRaw !== 'string' || !/^\d+$/.test(revRaw)) {
+        throw HttpError.badRequest('invalid_revision', 'manifestRevision 必须为非负整数');
+      }
+      rev = Number(revRaw);
+    }
+    dischargeService.listReviews(id, rev).then((v) => res.json(v)).catch(next);
+  });
+
+  // 对某修订号的已签发冻结清单提交卸货审查（同内容幂等返回首次结果）
+  router.post('/voyages/:id/manifests/:rev/discharge-reviews', (req, res, next) => {
+    const id = parseVoyageId(req);
+    const raw = req.params['rev'] ?? '';
+    if (!/^\d+$/.test(raw)) {
+      throw HttpError.badRequest('invalid_revision', '修订号必须为非负整数');
+    }
+    const input = parseBody(createDischargeReviewSchema, req.body);
+    dischargeService
+      .createReview(id, Number(raw), input)
+      .then((r) => res.status(r.replay ? 200 : 201).json({ replay: r.replay, ...r.review }))
+      .catch(next);
+  });
+
+  // 取某次卸货审查的冻结结果
+  router.get('/discharge-reviews/:reviewId', (req, res, next) => {
+    const reviewId = parseReviewId(req);
+    dischargeService.getReview(reviewId).then((v) => res.json(v)).catch(next);
   });
 
   // ---- 现场装船核对 ----
@@ -239,6 +278,14 @@ export function createApiRouter(
     const id = req.params['jobId'] ?? '';
     if (!UUID_RE.test(id)) {
       throw HttpError.badRequest('invalid_check_job_id', `核对作业 ID 格式非法: ${id}`);
+    }
+    return id;
+  }
+
+  function parseReviewId(req: Request): string {
+    const id = req.params['reviewId'] ?? '';
+    if (!UUID_RE.test(id)) {
+      throw HttpError.badRequest('invalid_discharge_review_id', `卸货审查 ID 格式非法: ${id}`);
     }
     return id;
   }

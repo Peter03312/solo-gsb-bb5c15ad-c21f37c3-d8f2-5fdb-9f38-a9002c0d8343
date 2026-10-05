@@ -222,3 +222,26 @@ BEGIN
         DROP TABLE public.incompat_rules;
     END IF;
 END $$;
+
+-- ---- 港序卸货审查（dispatch discharge review）----
+-- 调度员对【已签发并冻结的清单】提交有序卸港列表与每箱卸港，按清单冻结箱位逐港模拟，
+-- 判定能否不倒箱卸完。审查结论随提交内容（request_jsonb）与模拟结果（result_jsonb）
+-- 一并永久留档：航次后续调整或签发新清单【不改变】旧审查结果。
+-- (voyage_id, manifest_rev, request_hash) 唯一：同一清单 + 同一提交内容天然幂等，
+-- 同一清单允许按不同港序/不同卸港申报重复审查，各自独立留档。
+CREATE TABLE IF NOT EXISTS discharge_reviews (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    voyage_id    UUID NOT NULL REFERENCES voyages(id) ON DELETE CASCADE,
+    manifest_rev INTEGER NOT NULL CHECK (manifest_rev >= 0),
+    -- 提交内容（有序港序列表 + 每箱卸港）的规范化哈希（sha256，hex）
+    request_hash TEXT NOT NULL,
+    -- 冻结的提交内容与模拟结果（完整审查视图，GET 直接返回）
+    request_jsonb JSONB NOT NULL,
+    result_jsonb  JSONB NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (voyage_id, manifest_rev, request_hash),
+    FOREIGN KEY (voyage_id, manifest_rev)
+        REFERENCES manifests (voyage_id, rev) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_discharge_reviews_manifest
+    ON discharge_reviews (voyage_id, manifest_rev, created_at);
