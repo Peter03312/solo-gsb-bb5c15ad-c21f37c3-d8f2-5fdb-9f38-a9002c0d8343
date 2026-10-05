@@ -110,6 +110,22 @@ GET {{host}}/api/voyages/{{id}}/manifests
 ### 取某修订号的冻结清单
 GET {{host}}/api/voyages/{{id}}/manifests/4
 
+### 卸货审查：提交有序卸港列表 + 清单内每箱卸港，按冻结清单箱位逐港模拟
+### 返回各港实际卸箱/受阻箱（含上方仍在船阻挡箱号与箱位）/逾港未卸箱与全程无倒箱可行性；
+### 只读不落库：航次后续调整或签发新清单不改变旧清单的审查结果
+POST {{host}}/api/voyages/{{id}}/manifests/4/discharge-review
+Content-Type: application/json
+
+{
+  "ports": ["P1", "P2"],
+  "boxPorts": [
+    { "boxNo": "BOX-1", "port": "P1" },
+    { "boxNo": "BOX-2", "port": "P2" },
+    { "boxNo": "BOX-3", "port": "P1" },
+    { "boxNo": "BOX-4", "port": "P2" }
+  ]
+}
+
 ### 现场装船核对：以已签发清单 rev=4 开启作业（同一清单最多一个）
 POST {{host}}/api/voyages/{{id}}/check-jobs
 Content-Type: application/json

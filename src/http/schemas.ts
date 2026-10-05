@@ -120,6 +120,22 @@ export const migratePlanSchema = z.object({
   voyageRevision: nonNegativeInt,
 });
 
+// ---- 已签发清单的卸货审查 ----
+
+/**
+ * 卸货审查：提交有序卸港列表与清单内每个箱的卸港。
+ * 港序非空/不重复、卸港在港序内、箱号与清单完全一致等业务规则在 service 层校验。
+ */
+export const dischargeReviewSchema = z.object({
+  ports: z.array(z.string().trim().min(1, '卸港名不能为空').max(64)),
+  boxPorts: z.array(
+    z.object({
+      boxNo: z.string().trim().min(1, '箱号不能为空').max(32),
+      port: z.string().trim().min(1, '卸港名不能为空').max(64),
+    }),
+  ),
+});
+
 // ---- 现场装船核对 ----
 
 export const openCheckJobSchema = z.object({

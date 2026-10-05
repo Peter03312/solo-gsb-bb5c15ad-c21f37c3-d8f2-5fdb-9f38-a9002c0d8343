@@ -3,12 +3,14 @@ import { z } from 'zod';
 import { VoyageService } from '../service';
 import { CheckService } from '../check-service';
 import { PlanService } from '../plan-service';
+import { DischargeService } from '../discharge-service';
 import { HttpError } from '../errors';
 import {
   applyMovesSchema,
   checkReportSchema,
   createPlanSchema,
   createVoyageSchema,
+  dischargeReviewSchema,
   issueManifestSchema,
   migratePlanSchema,
   openCheckJobSchema,
@@ -21,6 +23,7 @@ export function createApiRouter(
   service: VoyageService,
   checkService: CheckService,
   planService: PlanService,
+  dischargeService: DischargeService,
 ): Router {
   const router = Router();
 
@@ -121,6 +124,20 @@ export function createApiRouter(
       throw HttpError.badRequest('invalid_revision', '修订号必须为非负整数');
     }
     service.getManifest(id, Number(raw)).then((v) => res.json(v)).catch(next);
+  });
+
+  // 卸货审查：以该修订号冻结清单箱位逐港模拟，判定全程无倒箱是否可行（只读，不落库）
+  router.post('/voyages/:id/manifests/:rev/discharge-review', (req, res, next) => {
+    const id = parseVoyageId(req);
+    const raw = req.params['rev'] ?? '';
+    if (!/^\d+$/.test(raw)) {
+      throw HttpError.badRequest('invalid_revision', '修订号必须为非负整数');
+    }
+    const input = parseBody(dischargeReviewSchema, req.body);
+    dischargeService
+      .review(id, Number(raw), input)
+      .then((v) => res.status(200).json(v))
+      .catch(next);
   });
 
   // ---- 现场装船核对 ----
